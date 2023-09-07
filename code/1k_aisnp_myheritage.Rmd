@@ -1,0 +1,180 @@
+---
+title: "Analysis of 1000 genomes genotypes and MyHeritage data with ancestry informative SNPs"
+author: "Benedek Dankó"
+date: 2023-09-06
+output:
+  html_document:
+    code_folding: hide
+    fig_crop: no
+    toc: true
+    theme: lumen
+    toc_float: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.table.format = "html") 
+```
+
+***
+
+```{r, warning=F, message=F, echo=F}
+# Load libraries:
+library("RCurl") 
+library("tidyverse")
+library("vcfR")
+library("FactoMineR")
+library("vcd")
+library("factoextra")
+library("plotly")
+```
+
+# Analysis of 1000 genomes genotypes and MyHeritage data utilizing ancestry informative SNPs from Kidd et al. and Seldin et al.
+
+The main idea is taken from Kevin Arvai's [repo](https://github.com/arvkevi/tgviz.git) using a Python notebook. 
+
+## Load data
+
+```{r, warning=F, message=F, echo=F, results='hide'}
+# MyHeritage raw SNP data:
+myheritage_raw <- read.csv("/home/benedek_danko/helmholtz/nextcloud/myheritage/MyHeritage_raw_dna_data.csv",
+                           skip=12, header = T, sep=",")
+# 1K genomes project data:
+one_k_samples = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/integrated_call_samples_v3.20130502.ALL.panel"
+text_data <- getURL(one_k_samples, connecttimeout = 60)
+df_samples <- read.csv(text = text_data,
+               sep="\t",
+               header = T) |> 
+  dplyr::select(-c(X, X.1)) |> 
+  column_to_rownames("sample")
+# Kid et al. SNP data:
+kid_vcf_file = read.vcfR("/home/benedek_danko/helmholtz/nextcloud/myheritage/Kidd.55AISNP.1kG.vcf")
+```
+
+## Plot 1K Genomes Project data using Kid et al. ancestry informative SNPs (AISNPs)
+
+### Formatting SNP data
+
+```{r, warning=F, message=F}
+df = as.data.frame(kid_vcf_file@gt) |> 
+  dplyr::select(rownames(df_samples)) |> 
+  mutate(rs_id=getFIX(kid_vcf_file)[,3]) |> 
+  column_to_rownames("rs_id") |> 
+  t() |> 
+  as.data.frame() 
+
+df[df=="0|0"]<-0
+df[df=="0|1" | df=="1|0"]<-1
+df[df=="1|1"]<-3
+
+dim(df)
+nrow(df) == nrow(df_samples) 
+```
+
+### Performing dimensionality reduction with [Factor Analysis of Mixed Data (FAMD)](https://search.r-project.org/CRAN/refmans/FactoMineR/html/FAMD.html) and plotting
+
+```{r, warning=F, message=F, fig.width=8, fig.height=7}
+famd <- FAMD(df, graph=FALSE)
+plot <- fviz_pca_ind(famd)
+fig <- plot_ly(data = plot$data |> 
+         left_join(df_samples |> 
+                     rownames_to_column("name"),
+                   by="name"), 
+               x = ~x, 
+               y = ~y,
+               color=~super_pop)
+fig
+```
+
+## Plot 1K Genomes Project and my own MyHeritage data using Kid et al. ancestry informative SNPs (AISNPs)
+
+### Formatting SNP data
+
+```{r, warning=F, message=F}
+# kid_vcf_file@fix |> 
+#   as.data.frame() |> 
+#   dplyr::select(c(ID, REF, ALT))
+
+myheritage_raw_sub <- myheritage_raw |> 
+  filter(RSID %in% colnames(df)) |> 
+  left_join(kid_vcf_file@fix |> 
+              as.data.frame() |> 
+              dplyr::select(c(ID, REF, ALT)),
+            by=c("RSID"="ID")) |> 
+  mutate(ALLELE1=substr(RESULT, 1, 1),
+         ALLELE2=substr(RESULT, 2, 2),
+         gt=ifelse(ALLELE1 == REF & 
+                     ALLELE2 == REF,
+                   0,
+                   ifelse((ALLELE1 == REF & ALLELE2 == ALT) |
+                            (ALLELE2 == REF & ALLELE1 == ALT),
+                          1,
+                          ifelse(ALLELE1 == ALT &
+                                   ALLELE2 == ALT, 3,
+                                 2)))) 
+# table(myheritage_raw_sub$gt)
+# 7 SNPs are missing from my data (could be imputed)
+
+df_updated <- df |> 
+  t() |> 
+  as.data.frame() |> 
+  rownames_to_column("RSID") |> 
+  #filter(RSID %in% myheritage_raw_sub$RSID) |> 
+  left_join(myheritage_raw_sub |> 
+              dplyr::select(c(RSID, gt)),
+            by="RSID") |> 
+  column_to_rownames("RSID") |> 
+  mutate_all(function(x) as.numeric(x)) |> 
+  rowwise() %>%
+  mutate(gt=ifelse(is.na(gt), 
+                   which.max(table(c_across())),
+                   gt), .) |> 
+  mutate_all(function(x) as.character(x)) |> 
+  t()
+```
+
+### Performing dimensionality reduction with [Factor Analysis of Mixed Data (FAMD)](https://search.r-project.org/CRAN/refmans/FactoMineR/html/FAMD.html) and plotting
+
+```{r, warning=F, message=F, fig.height=6.5, fig.width=8}
+famd <- FAMD(df_updated, graph=FALSE)
+plot <- fviz_pca_ind(famd)
+plot_data <- plot$data |> 
+  left_join(df_samples |> 
+              rownames_to_column("name"),
+            by="name") %>% 
+  mutate(pop=ifelse(name=="gt", "Me", pop),
+         super_pop=ifelse(name=="gt", "Me", super_pop),
+         symb=ifelse(name=="gt", "Me", "Other"))
+
+fig <- plot_ly(data = plot_data, 
+               x = ~x, 
+               y = ~y,
+               color=~super_pop,
+               symbol = ~symb, 
+               symbols = c("x", "circle"),
+               size=ifelse(plot_data$name=="gt", 8, 3))
+fig
+```
+
+## Eucledian distance 
+
+```{r, warning=F, message=F}
+euclidian = function(
+    mat1,       # Matrix with observations in COLUMNS.
+    mat2=mat1   # Matrix with observations in COLUMNS.
+) {
+  apply(mat1, 2, function(yi) sqrt(colSums((mat2 - yi)^2)))
+}
+
+d <- euclidian(t(plot_data[plot_data$name=="gt",2:3]),
+               t(plot_data[!plot_data$name=="gt",2:3])) |> 
+  as.data.frame() |> 
+  dplyr::rename("euc_dist"="2505") |> 
+  mutate(sample=plot_data$name[plot_data$name!="gt"]) |> 
+  arrange(euc_dist) |> 
+  left_join(df_samples |> 
+              rownames_to_column("sample"),
+            by="sample")
+```
