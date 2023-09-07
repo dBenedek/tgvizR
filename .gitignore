@@ -47,3 +47,6 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+/home/benedek_danko/helmholtz/code/tgvizR/data/MyHeritage_raw_dna_data.csv
+data/MyHeritage_raw_dna_data.csv
